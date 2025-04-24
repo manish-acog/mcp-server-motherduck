@@ -39,6 +39,12 @@ def main():
         choices=["markdown", "duckbox", "text"],
     )
 
+    parser.add_argument(
+        "--parquet-dir",
+        help="Path to base dir containing parquet file(s)",
+        default=None
+    )
+
     args = parser.parse_args()
     logger.info("🦆 MotherDuck MCP Server v" + server.SERVER_VERSION)
     logger.info("Ready to execute SQL queries via DuckDB/MotherDuck")
@@ -49,6 +55,7 @@ def main():
             db_path=args.db_path,
             motherduck_token=args.motherduck_token,
             result_format=args.result_format,
+            parquet_dir=args.parquet_dir,
             home_dir=args.home_dir,
             saas_mode=args.saas_mode,
         )
