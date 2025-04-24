@@ -112,10 +112,100 @@ class DatabaseClient:
             raise ValueError(f"❌ Error executing query: {e}")
 
 
+def analyze_parquet_partitions(db_client: DatabaseClient, directory_path: str) -> dict:
+    """
+    Analyzes a directory of partitioned parquet files to extract:
+    1. Partition keys and their possible values
+    2. The schema of a sample parquet file
+    3. TODO: Look at the first 5 rows of the table 
+    Args:
+        db_client: The database client to use for executing queries
+        directory_path: Path to the directory containing partitioned parquet files
+        
+    Returns:
+        A dictionary containing partition structure and schema information
+    """
+    try:
+        # Get all parquet files in the directory tree
+        files_query = f"SELECT * FROM glob('{directory_path}/**/*.parquet')"
+        files_result = db_client.query(files_query)
+        
+        # Parse the results to get file paths - handle markdown formatting
+        lines = files_result.strip().splitlines()
+        file_paths = []
+        
+        # Skip header and separator rows (first 2 lines)
+        if len(lines) > 2:
+            for line in lines[2:]:  # Start from the third line (index 2)
+                # Extract file path from markdown table row format: | index | path |
+                parts = line.split('|')
+                if len(parts) >= 3:  # Should have at least 3 parts: '', ' index ', ' path ', ''
+                    file_path = parts[2].strip()
+                    if file_path.endswith('.parquet'):
+                        file_paths.append(file_path)
+        
+        if not file_paths:
+            return {"error": "No parquet files found in directory"}
+        
+        # Sample file to get schema
+        sample_file_path = file_paths[0]
+        
+        # Extract partition info from paths
+        partition_keys = []
+        partition_values = {}
+        
+        # Process each file path to extract partition information
+        for file_path in file_paths:
+            # Get the relative path from the base directory
+            rel_path = file_path.replace(directory_path, '').lstrip('/')
+            # Split the path into segments
+            segments = rel_path.split('/')
+            
+            # Process each segment that could be a partition
+            for segment in segments:
+                if '=' in segment:
+                    key, value = segment.split('=', 1)
+                    if key not in partition_keys:
+                        partition_keys.append(key)
+                        partition_values[key] = []
+                    if value not in partition_values[key]:
+                        partition_values[key].append(value)
+        
+        # Get schema of the sample parquet file
+        schema_query = f"DESCRIBE SELECT * FROM '{sample_file_path}'"
+        schema_result = db_client.query(schema_query)
+        
+        # Parse the schema result from markdown format
+        schema_info = []
+        schema_lines = schema_result.strip().splitlines()
+        
+        # Skip header and separator rows
+        if len(schema_lines) > 2:
+            for line in schema_lines[2:]:  # Start from data rows
+                parts = [part.strip() for part in line.split('|')]
+                if len(parts) >= 7:  # Should have proper number of columns
+                    schema_info.append({
+                        "column_name": parts[2],
+                        "column_type": parts[3],
+                        "nullable": parts[4] == "YES"
+                    })
+        
+        # Return the combined information
+        return {
+            "directory_path": directory_path,
+            "partition_keys": partition_keys,
+            "partition_values": partition_values,
+            "sample_file": sample_file_path,
+            "schema": schema_info
+        }
+    except Exception as e:
+        return {"error": f"Error analyzing parquet directory: {str(e)}"}
+
 async def main(
     db_path: str,
     motherduck_token: str | None = None,
     result_format: Literal["markdown", "duckbox", "text"] = "markdown",
+    parquet_dir: str | None = None,
     home_dir: str | None = None,
     saas_mode: bool = False,
 ):
@@ -211,6 +301,15 @@ async def main(
                     "required": ["query"],
                 },
             ),
+            types.Tool(
+                name="analyze_parquet_directory",
+                description="Analyze a directory of partitioned parquet files to extract partition structure and schema. You don't need any input parameter to call this tool.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                },
+            ),
         ]
 
     @server.call_tool()
@@ -230,6 +329,19 @@ async def main(
                     ]
                 tool_response = db_client.query(arguments["query"])
                 return [types.TextContent(type="text", text=str(tool_response))]
+            
+            elif name == "analyze_parquet_directory":
+                # Use the provided directory path from arguments, or fall back to the one from command line
+                directory_path = arguments.get("directory_path", parquet_dir)
+                
+                if directory_path is None:
+                    return [types.TextContent(
+                        type="text", 
+                        text="Error: No parquet directory path provided. Please provide a directory_path parameter or use the --parquet-dir command line argument."
+                    )]
+                
+                partition_info = analyze_parquet_partitions(db_client, directory_path)
+                return [types.TextContent(type="text", text=str(partition_info))]
 
             return [types.TextContent(type="text", text=f"Unsupported tool: {name}")]
 
